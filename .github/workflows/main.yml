@@ -1,0 +1,89 @@
+name: Kali-RDP-Tailscale
+on:
+  workflow_dispatch:
+
+jobs:
+  kali:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3600
+
+    steps:
+
+    - name: Check Docker
+      run: |
+        docker --version || (curl -fsSL https://get.docker.com | sh && sudo systemctl start docker)
+
+    - name: Install Tailscale on host (runner)
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y curl gnupg
+        curl -fsSL https://tailscale.com/install.sh | sudo sh
+
+    - name: Start tailscaled and authenticate
+      run: |
+        sudo tailscaled --state=/tmp/tailscaled.state --socket=/tmp/tailscaled.sock &>/tmp/tailscaled.log &
+        sleep 2
+        sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=kali-gui-${GITHUB_RUN_ID}
+        TS_IP=$(sudo tailscale ip -4)
+        echo "TAILSCALE_IP=$TS_IP" >> $GITHUB_ENV
+
+    - name: Pull Kali image
+      run: |
+        sudo docker pull kalilinux/kali-rolling
+
+    - name: Remove existing container (if any)
+      run: |
+        sudo docker rm -f kali || true
+
+    - name: Start Kali container (map RDP 3389)
+      run: |
+        sudo docker run -d --name kali \
+          --hostname kali-gui \
+          --cap-add NET_ADMIN \
+          -p 3389:3389 \
+          kalilinux/kali-rolling sleep infinity
+
+    - name: Install GUI + RDP inside Kali
+      run: |
+        sudo docker exec kali bash -c "
+        apt-get update &&
+        DEBIAN_FRONTEND=noninteractive apt-get install -y \
+        xfce4 xfce4-goodies xrdp dbus-x11 sudo openssh-server &&
+        echo xfce4-session > /root/.xsession
+        "
+
+    - name: Enable & start RDP
+      run: |
+        sudo docker exec kali bash -c "
+        systemctl enable xrdp || true &&
+        service xrdp start || /usr/sbin/xrdp-sesman &&
+        /usr/sbin/xrdp
+        "
+
+    - name: Create user and password
+      run: |
+        PASS=$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 16)
+        sudo docker exec kali bash -c "
+        useradd -m -s /bin/bash kaliuser || true &&
+        echo 'kaliuser:${PASS}' | chpasswd &&
+        adduser kaliuser sudo
+        "
+        echo "RDP_USER=kaliuser" >> $GITHUB_ENV
+        echo "RDP_PASS=$PASS" >> $GITHUB_ENV
+
+    - name: Show RDP Info
+      run: |
+        echo ""
+        echo "===================================="
+        echo " Kali GUI RDP Access"
+        echo "------------------------------------"
+        echo "RDP IP:   $TAILSCALE_IP"
+        echo "Port:     3389"
+        echo "User:     $RDP_USER"
+        echo "Password: $RDP_PASS"
+        echo "===================================="
+        echo ""
+
+    - name: Keep Alive
+      run: |
+        while true; do sleep 300; done
