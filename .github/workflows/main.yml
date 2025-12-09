@@ -9,36 +9,33 @@ jobs:
 
     steps:
 
-    - name: Check Docker
+    - name: Install Docker
       run: |
         docker --version || (curl -fsSL https://get.docker.com | sh && sudo systemctl start docker)
 
-    - name: Install Tailscale on host (runner)
+    - name: Install Tailscale
       run: |
         sudo apt-get update
         sudo apt-get install -y curl gnupg
         curl -fsSL https://tailscale.com/install.sh | sudo sh
 
-    - name: Start tailscaled and authenticate
+    - name: Start tailscaled + Login
       run: |
-        sudo tailscaled --state=/tmp/tailscaled.state --socket=/tmp/tailscaled.sock &>/tmp/tailscaled.log &
-        sleep 2
-        sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=kali-gui-${GITHUB_RUN_ID}
-        TS_IP=$(sudo tailscale ip -4)
-        echo "TAILSCALE_IP=$TS_IP" >> $GITHUB_ENV
+        sudo tailscaled --state=/tmp/tailscaled.state --socket=/tmp/tailscaled.sock &
+        sleep 3
+        sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=kali-rdp-${GITHUB_RUN_ID}
+        echo "TAILSCALE_IP=$(sudo tailscale ip -4)" >> $GITHUB_ENV
 
-    - name: Pull Kali image
-      run: |
-        sudo docker pull kalilinux/kali-rolling
+    - name: Pull Kali Docker Image
+      run: sudo docker pull kalilinux/kali-rolling
 
-    - name: Remove existing container (if any)
-      run: |
-        sudo docker rm -f kali || true
+    - name: Remove Old Container
+      run: sudo docker rm -f kali || true
 
-    - name: Start Kali container (map RDP 3389)
+    - name: Start Kali Container
       run: |
         sudo docker run -d --name kali \
-          --hostname kali-gui \
+          --hostname kali-rdp \
           --cap-add NET_ADMIN \
           -p 3389:3389 \
           kalilinux/kali-rolling sleep infinity
@@ -46,27 +43,34 @@ jobs:
     - name: Install GUI + RDP inside Kali
       run: |
         sudo docker exec kali bash -c "
-        apt-get update &&
-        DEBIAN_FRONTEND=noninteractive apt-get install -y \
-        xfce4 xfce4-goodies xrdp dbus-x11 sudo openssh-server &&
-        echo xfce4-session > /root/.xsession
+          apt-get update &&
+          DEBIAN_FRONTEND=noninteractive apt-get install -y \
+          xfce4 xfce4-goodies xrdp dbus-x11 sudo nano curl &&
+          echo xfce4-session > /root/.xsession &&
+          echo xfce4-session > /etc/skel/.xsession
         "
 
-    - name: Enable & start RDP
+    - name: Start D-Bus
       run: |
-        sudo docker exec kali bash -c "
-        systemctl enable xrdp || true &&
-        service xrdp start || /usr/sbin/xrdp-sesman &&
-        /usr/sbin/xrdp
+        sudo docker exec -d kali bash -c "
+          /usr/bin/dbus-daemon --system --fork
         "
 
-    - name: Create user and password
+    - name: Start XRDP (manual, no systemd)
       run: |
-        PASS=$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 16)
+        sudo docker exec -d kali bash -c "
+          mkdir -p /var/run/xrdp &&
+          /usr/sbin/xrdp-sesman &&
+          /usr/sbin/xrdp
+        "
+
+    - name: Create User + Password
+      run: |
+        PASS=$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 12)
         sudo docker exec kali bash -c "
-        useradd -m -s /bin/bash kaliuser || true &&
-        echo 'kaliuser:${PASS}' | chpasswd &&
-        adduser kaliuser sudo
+          useradd -m -s /bin/bash kaliuser || true &&
+          echo 'kaliuser:${PASS}' | chpasswd &&
+          adduser kaliuser sudo
         "
         echo "RDP_USER=kaliuser" >> $GITHUB_ENV
         echo "RDP_PASS=$PASS" >> $GITHUB_ENV
@@ -75,12 +79,12 @@ jobs:
       run: |
         echo ""
         echo "===================================="
-        echo " Kali GUI RDP Access"
-        echo "------------------------------------"
-        echo "RDP IP:   $TAILSCALE_IP"
-        echo "Port:     3389"
-        echo "User:     $RDP_USER"
-        echo "Password: $RDP_PASS"
+        echo "       Kali Linux RDP Access"
+        echo "===================================="
+        echo "IP Address : $TAILSCALE_IP"
+        echo "Port       : 3389"
+        echo "User       : $RDP_USER"
+        echo "Password   : $RDP_PASS"
         echo "===================================="
         echo ""
 
