@@ -23,7 +23,7 @@ jobs:
       run: |
         sudo tailscaled --state=/tmp/tailscaled.state --socket=/tmp/tailscaled.sock &
         sleep 3
-        sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=kali-nomachine-${GITHUB_RUN_ID}
+        sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=kali-nx-${GITHUB_RUN_ID}
         echo "TAILSCALE_IP=$(sudo tailscale ip -4)" >> $GITHUB_ENV
 
     - name: Pull Kali Docker Image
@@ -46,12 +46,12 @@ jobs:
         sudo docker exec kali bash -c "
           apt-get update &&
           DEBIAN_FRONTEND=noninteractive apt-get install -y \
-          xfce4 xfce4-goodies xrdp dbus-x11 sudo curl nano &&
+          xfce4 xfce4-goodies xrdp dbus-x11 sudo curl nano wget &&
           echo xfce4-session > /root/.xsession &&
           echo xfce4-session > /etc/skel/.xsession &&
 
           # Install NoMachine
-          curl -LO https://download.nomachine.com/download/8.12/Linux/nomachine_8.12.3_1_amd64.deb &&
+          wget https://download.nomachine.com/download/8.12/Linux/nomachine_8.12.3_1_amd64.deb &&
           dpkg -i nomachine_*.deb || apt -f install -y
         "
 
@@ -72,11 +72,11 @@ jobs:
           /usr/NX/bin/nxserver --startup
         "
 
-    - name: Disable Firewall (All Traffic Allowed)
+    - name: Disable Firewall (nftables)
       run: |
         sudo docker exec kali bash -c "
-          iptables -F &&
-          iptables -X
+          apt-get install -y nftables || true
+          nft flush ruleset
         "
 
     - name: Create User + Password
