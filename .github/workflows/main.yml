@@ -1,4 +1,4 @@
-name: Kali-RDP-Tailscale
+name: Kali-RDP-NoMachine-Tailscale
 on:
   workflow_dispatch:
 
@@ -23,7 +23,7 @@ jobs:
       run: |
         sudo tailscaled --state=/tmp/tailscaled.state --socket=/tmp/tailscaled.sock &
         sleep 3
-        sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=kali-rdp-${GITHUB_RUN_ID}
+        sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=kali-nomachine-${GITHUB_RUN_ID}
         echo "TAILSCALE_IP=$(sudo tailscale ip -4)" >> $GITHUB_ENV
 
     - name: Pull Kali Docker Image
@@ -32,36 +32,51 @@ jobs:
     - name: Remove Old Container
       run: sudo docker rm -f kali || true
 
-    - name: Start Kali Container
+    - name: Start Kali Container (open ports RDP + NoMachine)
       run: |
         sudo docker run -d --name kali \
-          --hostname kali-rdp \
+          --hostname kali-nx \
           --cap-add NET_ADMIN \
           -p 3389:3389 \
+          -p 4000:4000 \
           kalilinux/kali-rolling sleep infinity
 
-    - name: Install GUI + RDP inside Kali
+    - name: Install GUI + RDP + NoMachine
       run: |
         sudo docker exec kali bash -c "
           apt-get update &&
           DEBIAN_FRONTEND=noninteractive apt-get install -y \
-          xfce4 xfce4-goodies xrdp dbus-x11 sudo nano curl &&
+          xfce4 xfce4-goodies xrdp dbus-x11 sudo curl nano &&
           echo xfce4-session > /root/.xsession &&
-          echo xfce4-session > /etc/skel/.xsession
+          echo xfce4-session > /etc/skel/.xsession &&
+
+          # Install NoMachine
+          curl -LO https://download.nomachine.com/download/8.12/Linux/nomachine_8.12.3_1_amd64.deb &&
+          dpkg -i nomachine_*.deb || apt -f install -y
         "
 
     - name: Start D-Bus
-      run: |
-        sudo docker exec -d kali bash -c "
-          /usr/bin/dbus-daemon --system --fork
-        "
+      run: sudo docker exec -d kali bash -c "/usr/bin/dbus-daemon --system --fork"
 
-    - name: Start XRDP (manual, no systemd)
+    - name: Start XRDP
       run: |
         sudo docker exec -d kali bash -c "
           mkdir -p /var/run/xrdp &&
           /usr/sbin/xrdp-sesman &&
           /usr/sbin/xrdp
+        "
+
+    - name: Start NoMachine Server
+      run: |
+        sudo docker exec -d kali bash -c "
+          /usr/NX/bin/nxserver --startup
+        "
+
+    - name: Disable Firewall (All Traffic Allowed)
+      run: |
+        sudo docker exec kali bash -c "
+          iptables -F &&
+          iptables -X
         "
 
     - name: Create User + Password
@@ -75,19 +90,21 @@ jobs:
         echo "RDP_USER=kaliuser" >> $GITHUB_ENV
         echo "RDP_PASS=$PASS" >> $GITHUB_ENV
 
-    - name: Show RDP Info
+    - name: Show Access Info
       run: |
         echo ""
         echo "===================================="
-        echo "       Kali Linux RDP Access"
+        echo "       Kali Remote Access"
         echo "===================================="
-        echo "IP Address : $TAILSCALE_IP"
-        echo "Port       : 3389"
-        echo "User       : $RDP_USER"
-        echo "Password   : $RDP_PASS"
+        echo "Tailscale IP : $TAILSCALE_IP"
+        echo ""
+        echo "RDP          : $TAILSCALE_IP:3389"
+        echo "NoMachine    : $TAILSCALE_IP:4000"
+        echo ""
+        echo "User         : $RDP_USER"
+        echo "Password     : $RDP_PASS"
         echo "===================================="
         echo ""
 
     - name: Keep Alive
-      run: |
-        while true; do sleep 300; done
+      run: while true; do sleep 300; done
