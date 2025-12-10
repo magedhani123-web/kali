@@ -1,4 +1,4 @@
-name: Kali-RDP-
+name: Kali-RDP-NoMachine-Tailscale
 on:
   workflow_dispatch:
 
