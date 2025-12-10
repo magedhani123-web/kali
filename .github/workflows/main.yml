@@ -8,18 +8,19 @@ jobs:
     timeout-minutes: 3600
 
     steps:
-
     - name: Install Docker
       run: |
         docker --version || (curl -fsSL https://get.docker.com | sh && sudo systemctl start docker)
 
-    - name: Install Tailscale
+    - name: Install Tailscale (host)
       run: |
         sudo apt-get update
         sudo apt-get install -y curl gnupg
         curl -fsSL https://tailscale.com/install.sh | sudo sh
 
     - name: Start tailscaled + Login
+      env:
+        TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
       run: |
         sudo tailscaled --state=/tmp/tailscaled.state --socket=/tmp/tailscaled.sock &
         sleep 3
@@ -32,63 +33,61 @@ jobs:
     - name: Remove Old Container
       run: sudo docker rm -f kali || true
 
-    - name: Start Kali Container (open ports RDP + NoMachine)
+    - name: Create Kali container (privileged) + expose ports
       run: |
         sudo docker run -d --name kali \
           --hostname kali-nx \
-          --cap-add NET_ADMIN \
+          --privileged \
           -p 3389:3389 \
           -p 4000:4000 \
           kalilinux/kali-rolling sleep infinity
 
-    - name: Install GUI + RDP + NoMachine
-      run: |
-        sudo docker exec kali bash -c "
-          apt-get update &&
-          DEBIAN_FRONTEND=noninteractive apt-get install -y \
-          xfce4 xfce4-goodies xrdp dbus-x11 sudo curl nano wget &&
-          echo xfce4-session > /root/.xsession &&
-          echo xfce4-session > /etc/skel/.xsession &&
-
-          # Install NoMachine
-          wget https://download.nomachine.com/download/8.12/Linux/nomachine_8.12.3_1_amd64.deb &&
-          dpkg -i nomachine_*.deb || apt -f install -y
-        "
-
-    - name: Start D-Bus
-      run: sudo docker exec -d kali bash -c "/usr/bin/dbus-daemon --system --fork"
-
-    - name: Start XRDP
-      run: |
-        sudo docker exec -d kali bash -c "
-          mkdir -p /var/run/xrdp &&
-          /usr/sbin/xrdp-sesman &&
-          /usr/sbin/xrdp
-        "
-
-    - name: Start NoMachine Server
-      run: |
-        sudo docker exec -d kali bash -c "
-          /usr/NX/bin/nxserver --startup
-        "
-
-    - name: Disable Firewall (nftables)
-      run: |
-        sudo docker exec kali bash -c "
-          apt-get install -y nftables || true
-          nft flush ruleset
-        "
-
-    - name: Create User + Password
+    - name: Create user inside container (so .xsession can be placed)
       run: |
         PASS=$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 12)
         sudo docker exec kali bash -c "
           useradd -m -s /bin/bash kaliuser || true &&
           echo 'kaliuser:${PASS}' | chpasswd &&
-          adduser kaliuser sudo
+          usermod -aG sudo kaliuser
         "
         echo "RDP_USER=kaliuser" >> $GITHUB_ENV
         echo "RDP_PASS=$PASS" >> $GITHUB_ENV
+
+    - name: Install GUI, XRDP, NoMachine and networking tools
+      run: |
+        sudo docker exec kali bash -c "
+          apt-get update &&
+          DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            xfce4 xfce4-goodies xorgxrdp xrdp dbus-x11 wget curl nano sudo xserver-xorg-core \
+            iptables nftables inetutils-ping net-tools ||
+          true
+
+          # set XFCE as default session for root and new user
+          echo 'xfce4-session' > /root/.xsession
+          echo 'xfce4-session' > /home/kaliuser/.xsession
+          chown kaliuser:kaliuser /home/kaliuser/.xsession
+
+          # install NoMachine .deb
+          wget -q https://download.nomachine.com/download/8.12/Linux/nomachine_8.12.3_1_amd64.deb -O /tmp/nomachine.deb &&
+          dpkg -i /tmp/nomachine.deb || apt-get -y -f install
+        "
+
+    - name: Start dbus, xrdp, nomachine inside container
+      run: |
+        sudo docker exec -d kali bash -c "rm -f /var/run/dbus/pid || true; /usr/bin/dbus-daemon --system --fork || true"
+        sudo docker exec -d kali bash -c "mkdir -p /var/run/xrdp; /usr/sbin/xrdp-sesman || true; /usr/sbin/xrdp || true"
+        sudo docker exec -d kali bash -c "/usr/NX/bin/nxserver --startup || true"
+        # wait then check listeners
+        sleep 3
+        sudo docker exec kali ss -tulpen | grep -E '3389|4000' || true
+
+    - name: Disable firewall inside container (flush nftables/iptables)
+      run: |
+        sudo docker exec kali bash -c "
+          apt-get install -y nftables iptables || true
+          nft flush ruleset || true
+          iptables -F || true
+        "
 
     - name: Show Access Info
       run: |
@@ -105,6 +104,14 @@ jobs:
         echo "Password     : $RDP_PASS"
         echo "===================================="
         echo ""
+
+    - name: Debug: show xrdp / NoMachine logs (if connection fails)
+      run: |
+        echo '---- xrdp logs ----'
+        sudo docker exec kali bash -c "test -f /var/log/xrdp.log && tail -n 200 /var/log/xrdp.log || true"
+        sudo docker exec kali bash -c "test -f /var/log/xrdp-sesman.log && tail -n 200 /var/log/xrdp-sesman.log || true"
+        echo '---- NoMachine logs ----'
+        sudo docker exec kali bash -c "test -d /usr/NX/var/log && tail -n 200 /usr/NX/var/log/* || true"
 
     - name: Keep Alive
       run: while true; do sleep 300; done
